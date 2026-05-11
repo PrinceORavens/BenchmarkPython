@@ -1,0 +1,113 @@
+# Sentinel SCA — BenchmarkPython dependency security scan
+# BenchmarkPython is an intentionally vulnerable Python benchmark suite.
+# Findings are expected — this workflow validates Sentinel SCA's PyPI coverage.
+
+name: Sentinel SCA — BenchmarkPython Scan
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'requirements*.txt'
+      - 'Pipfile'
+      - 'Pipfile.lock'
+      - 'pyproject.toml'
+      - 'poetry.lock'
+      - 'setup.py'
+      - 'setup.cfg'
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Daily at 06:30 UTC (offset from BenchmarkJava to spread API load)
+    - cron: '30 6 * * *'
+  workflow_dispatch:
+    inputs:
+      fail_on:
+        description: 'Fail on severity level'
+        required: false
+        default: 'critical'
+        type: choice
+        options: [critical, high, medium, low]
+
+permissions:
+  contents: read
+  security-events: write   # SARIF upload to GitHub Security tab
+  pages: write             # GitHub Pages deployment
+  id-token: write          # OIDC Pages deployment
+
+jobs:
+  sca-scan:
+    name: BenchmarkPython Dependency Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Sentinel SCA
+        run: |
+          git clone --depth 1 --branch main https://github.com/PrinceORavens/sentinel-sca.git /tmp/sentinel-sca
+          cd /tmp/sentinel-sca && npm install --omit=dev && npm link
+
+      - name: Run SCA Scan
+        id: sca-scan
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          sentinel-sca scan \
+            --path . \
+            --ecosystem pypi \
+            --output sarif,html \
+            --file sentinel-results \
+            --fail-on ${{ inputs.fail_on || 'critical' }} \
+            --baseline
+        continue-on-error: true
+
+      - name: Upload SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: sentinel-results.sarif
+          category: sentinel-sca
+        continue-on-error: true
+
+      - name: Upload Report Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-sca-benchmarkpython-${{ github.run_id }}
+          path: |
+            sentinel-results.sarif
+            sentinel-results.html
+          retention-days: 30
+
+      - name: Prepare Pages artifact
+        if: github.ref == 'refs/heads/main' && always()
+        run: |
+          mkdir -p _site
+          cp sentinel-results.html _site/index.html
+
+      - name: Upload Pages artifact
+        if: github.ref == 'refs/heads/main' && always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        if: github.ref == 'refs/heads/main' && always()
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Enforce Security Gate
+        if: steps.sca-scan.outcome == 'failure'
+        run: |
+          echo "::error::Sentinel SCA found vulnerabilities at or above the configured severity threshold."
+          echo "::notice::BenchmarkPython is intentionally insecure — use --fail-on critical to gate on only the worst findings."
+          exit 1
