@@ -67,6 +67,7 @@ jobs:
             --output sarif,html \
             --file sentinel-results \
             --fail-on ${{ inputs.fail_on || 'critical' }} \
+            --no-cache \
             --baseline
         continue-on-error: true
 
